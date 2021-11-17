@@ -75,7 +75,7 @@ func TestQuery_MySQL(t *testing.T) {
 			RawSQL: "SELECT SLEEP(5)",
 		}
 
-		_, err := query(ctx, db, []sqlutil.Converter{}, nil, q)
+		_, _, err := query(ctx, db, []sqlutil.Converter{}, nil, q)
 		if err == nil {
 			t.Fatal("expected an error but received none")
 		}

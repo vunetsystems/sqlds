@@ -18,6 +18,7 @@ const defaultKey = "_default"
 
 type sqldatasource struct {
 	Completable
+	QueryLifeCycle
 
 	dbConnections  sync.Map
 	c              Driver
@@ -84,8 +85,9 @@ func (ds *sqldatasource) QueryData(ctx context.Context, req *backend.QueryDataRe
 	// Execute each query and store the results by query RefID
 	for _, q := range req.Queries {
 		go func(query backend.DataQuery) {
-			frames, err := ds.handleQuery(ctx, query)
-
+			ctx, query := ds.QueryLifeCycle.PreProcessQuery(ctx, query)
+			ctx, frames, err := ds.handleQuery(ctx, query)
+			_, frames, err = ds.QueryLifeCycle.PostProcessResults(ctx, frames, err)
 			response.Set(query.RefID, backend.DataResponse{
 				Frames: frames,
 				Error:  err,
@@ -129,17 +131,17 @@ func (ds *sqldatasource) getDB(q *Query) (*sql.DB, string, error) {
 }
 
 // handleQuery will call query, and attempt to reconnect if the query failed
-func (ds *sqldatasource) handleQuery(ctx context.Context, req backend.DataQuery) (data.Frames, error) {
+func (ds *sqldatasource) handleQuery(ctx context.Context, req backend.DataQuery) (context.Context, data.Frames, error) {
 	// Convert the backend.DataQuery into a Query object
 	q, err := GetQuery(req)
 	if err != nil {
-		return getErrorFrameFromQuery(q), err
+		return getErrorFrameFromQuery(ctx, q, err, "")
 	}
 
 	// Apply supported macros to the query
 	q.RawSQL, err = interpolate(ds.c, q)
 	if err != nil {
-		return getErrorFrameFromQuery(q), fmt.Errorf("%s: %w", "Could not apply macros", err)
+		return getErrorFrameFromQuery(ctx, q, err, "Could not apply macros")
 	}
 
 	// Apply the default FillMode, overwritting it if the query specifies it
@@ -151,7 +153,7 @@ func (ds *sqldatasource) handleQuery(ctx context.Context, req backend.DataQuery)
 	// Retrieve the database connection
 	db, cacheKey, err := ds.getDB(q)
 	if err != nil {
-		return getErrorFrameFromQuery(q), err
+		return getErrorFrameFromQuery(ctx, q, err, "")
 	}
 
 	if ds.driverSettings.Timeout != 0 {
@@ -160,38 +162,41 @@ func (ds *sqldatasource) handleQuery(ctx context.Context, req backend.DataQuery)
 
 		ctx = tctx
 	}
-
+	ctx, q = ds.QueryLifeCycle.PostProcessQuery(ctx, q)
 	// FIXES:
 	//  * Some datasources (snowflake) expire connections or have an authentication token that expires if not used in 1 or 4 hours.
 	//    Because the datasource driver does not include an option for permanent connections, we retry the connection
 	//    if the query fails. NOTE: this does not include some errors like "ErrNoRows"
-	res, err := query(ctx, db, ds.c.Converters(), fillMode, q)
+	ctx, res, err := query(ctx, db, ds.c.Converters(), fillMode, q)
 	if err == nil {
-		return res, nil
+		return ctx, res, nil
 	}
 
 	if errors.Is(err, ErrorNoResults) {
-		return res, nil
+		return ctx, res, nil
 	}
 
 	if errors.Is(err, ErrorQuery) {
 		db, err = ds.c.Connect(ds.settings, q.ConnectionArgs)
 		if err != nil {
-			return nil, err
+			return ctx, nil, err
 		}
 		ds.dbConnections.Store(cacheKey, db)
 
 		return query(ctx, db, ds.c.Converters(), fillMode, q)
 	}
 
-	return nil, err
+	return ctx, nil, err
 }
 
 // CheckHealth pings the connected SQL database
 func (ds *sqldatasource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
 	db, ok := ds.dbConnections.Load(defaultKey)
 	if !ok {
-		return nil, fmt.Errorf("unable to get default db connection")
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: "unable to get default db connection",
+		}, nil
 	}
 	if err := db.(*sql.DB).Ping(); err != nil {
 		return &backend.CheckHealthResult{

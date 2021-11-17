@@ -87,18 +87,21 @@ func GetQuery(query backend.DataQuery) (*Query, error) {
 }
 
 // getErrorFrameFromQuery returns a error frames with empty data and meta fields
-func getErrorFrameFromQuery(query *Query) data.Frames {
+func getErrorFrameFromQuery(ctx context.Context, query *Query, err error, errorMsg string) (context.Context, data.Frames, error) {
 	frames := data.Frames{}
 	frame := data.NewFrame(query.RefID)
 	frame.Meta = &data.FrameMeta{
 		ExecutedQueryString: query.RawSQL,
 	}
 	frames = append(frames, frame)
-	return frames
+	if errorMsg != "" {
+		return ctx, frames, fmt.Errorf("%s: %w", errorMsg, err)
+	}
+	return ctx, frames, err
 }
 
 // query sends the query to the connection and converts the rows to a dataframe.
-func query(ctx context.Context, db Connection, converters []sqlutil.Converter, fillMode *data.FillMissing, query *Query) (data.Frames, error) {
+func query(ctx context.Context, db Connection, converters []sqlutil.Converter, fillMode *data.FillMissing, query *Query) (context.Context, data.Frames, error) {
 	// Query the rows from the database
 	rows, err := db.QueryContext(ctx, query.RawSQL)
 	if err != nil {
@@ -106,8 +109,7 @@ func query(ctx context.Context, db Connection, converters []sqlutil.Converter, f
 		if errors.Is(err, context.Canceled) {
 			errType = context.Canceled
 		}
-
-		return getErrorFrameFromQuery(query), fmt.Errorf("%w: %s", errType, err.Error())
+		return getErrorFrameFromQuery(ctx, query, errType, err.Error())
 	}
 
 	// Check for an error response
@@ -115,9 +117,9 @@ func query(ctx context.Context, db Connection, converters []sqlutil.Converter, f
 		if err == sql.ErrNoRows {
 			// Should we even response with an error here?
 			// The panel will simply show "no data"
-			return getErrorFrameFromQuery(query), fmt.Errorf("%s: %w", "No results from query", err)
+			return getErrorFrameFromQuery(ctx, query, err, "No results from query")
 		}
-		return getErrorFrameFromQuery(query), fmt.Errorf("%s: %w", "Error response from database", err)
+		return getErrorFrameFromQuery(ctx, query, err, "Error response from database")
 	}
 
 	defer func() {
@@ -129,10 +131,10 @@ func query(ctx context.Context, db Connection, converters []sqlutil.Converter, f
 	// Convert the response to frames
 	res, err := getFrames(rows, -1, converters, fillMode, query)
 	if err != nil {
-		return getErrorFrameFromQuery(query), fmt.Errorf("%w: %s", err, "Could not process SQL results")
+		return getErrorFrameFromQuery(ctx, query, err, "Could not process SQL results")
 	}
 
-	return res, nil
+	return ctx, res, nil
 }
 
 func getFrames(rows *sql.Rows, limit int64, converters []sqlutil.Converter, fillMode *data.FillMissing, query *Query) (data.Frames, error) {
