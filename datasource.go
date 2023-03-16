@@ -55,6 +55,7 @@ type SQLDatasource struct {
 	// are hit. The datasource enabling this should make sure connections are cached
 	// if necessary.
 	EnableMultipleConnections bool
+	NewContext                bool
 }
 
 func (ds *SQLDatasource) getDBConnection(key string) (dbConnection, bool) {
@@ -208,7 +209,14 @@ func (ds *SQLDatasource) handleQuery(ctx context.Context, req backend.DataQuery,
 	}
 
 	if ds.driverSettings.Timeout != 0 {
-		tctx, cancel := context.WithTimeout(ctx, ds.driverSettings.Timeout)
+		var tctx context.Context
+		var cancel context.CancelFunc
+
+		if ds.NewContext {
+			tctx, cancel = context.WithTimeout(context.Background(), ds.driverSettings.Timeout)
+		} else {
+			tctx, cancel = context.WithTimeout(ctx, ds.driverSettings.Timeout)
+		}
 		defer cancel()
 
 		ctx = tctx
