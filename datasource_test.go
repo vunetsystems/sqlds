@@ -7,9 +7,10 @@ import (
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
-	"github.com/grafana/sqlds/v3"
-	"github.com/grafana/sqlds/v3/test"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/vunetsystems/sqlds"
+	"github.com/vunetsystems/sqlds/test"
 )
 
 func Test_health_retries(t *testing.T) {
@@ -99,7 +100,12 @@ func Test_no_errors(t *testing.T) {
 	assert.Equal(t, expected, result.Message)
 }
 
-func queryRequest(t *testing.T, name string, opts test.DriverOpts, cfg string) (*backend.QueryDataRequest, *test.SqlHandler, *sqlds.SQLDatasource) {
+func queryRequest(
+	t *testing.T,
+	name string,
+	opts test.DriverOpts,
+	cfg string,
+) (*backend.QueryDataRequest, *test.SqlHandler, *sqlds.SQLDatasource) {
 	driver, handler := test.NewDriver(name, test.Data{}, nil, opts)
 	ds := sqlds.NewDatasource(driver)
 
@@ -110,7 +116,10 @@ func queryRequest(t *testing.T, name string, opts test.DriverOpts, cfg string) (
 	return req, handler, ds
 }
 
-func setupQueryRequest(id string, cfg string) (*backend.QueryDataRequest, backend.DataSourceInstanceSettings) {
+func setupQueryRequest(
+	id string,
+	cfg string,
+) (*backend.QueryDataRequest, backend.DataSourceInstanceSettings) {
 	s := backend.DataSourceInstanceSettings{UID: id, JSONData: []byte(cfg)}
 	return &backend.QueryDataRequest{
 		PluginContext: backend.PluginContext{
@@ -125,7 +134,12 @@ func setupQueryRequest(id string, cfg string) (*backend.QueryDataRequest, backen
 	}, s
 }
 
-func healthRequest(t *testing.T, name string, opts test.DriverOpts, cfg string) (backend.CheckHealthRequest, *test.SqlHandler, *sqlds.SQLDatasource) {
+func healthRequest(
+	t *testing.T,
+	name string,
+	opts test.DriverOpts,
+	cfg string,
+) (backend.CheckHealthRequest, *test.SqlHandler, *sqlds.SQLDatasource) {
 	driver, handler := test.NewDriver(name, test.Data{}, nil, opts)
 	ds := sqlds.NewDatasource(driver)
 
@@ -136,7 +150,10 @@ func healthRequest(t *testing.T, name string, opts test.DriverOpts, cfg string) 
 	return req, handler, ds
 }
 
-func setupHealthRequest(id string, cfg string) (backend.CheckHealthRequest, backend.DataSourceInstanceSettings) {
+func setupHealthRequest(
+	id string,
+	cfg string,
+) (backend.CheckHealthRequest, backend.DataSourceInstanceSettings) {
 	settings := backend.DataSourceInstanceSettings{UID: id, JSONData: []byte(cfg)}
 	req := backend.CheckHealthRequest{
 		PluginContext: backend.PluginContext{

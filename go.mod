@@ -1,4 +1,4 @@
-module github.com/grafana/sqlds/v3
+module github.com/vunetsystems/sqlds
 
 go 1.21
 
