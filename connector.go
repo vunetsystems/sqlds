@@ -22,9 +22,11 @@ type Connector struct {
 	// JSONData carries a username, so that users connecting with distinct
 	// credentials get isolated pooled connections (vunet per-user connection).
 	storeKey string
-	// defaultKey is the cache key for the single-connection path. It is
-	// fmt.Sprintf("%s-default", storeKey) and never changes for the life of the
-	// connector, so we compute it once in NewConnector.
+	// defaultKey is the cache key the bootstrap connection is stored under at
+	// construction time: fmt.Sprintf("%s-default", storeKey) for the settings
+	// NewConnector was called with. Per-request lookups do NOT use this field —
+	// they re-derive the key from the current request (see baseKey) so each user
+	// reaches their own connection.
 	defaultKey string
 	// Enabling multiple connections may cause that concurrent connection limits
 	// are hit. The datasource enabling this should make sure connections are cached
@@ -65,6 +67,52 @@ func storeKeyFor(settings backend.DataSourceInstanceSettings) string {
 	return fmt.Sprintf("%s-%s", uid, username)
 }
 
+// settingsFromContext returns the DataSourceInstanceSettings for the request
+// being served, or nil outside a request. The Grafana SDK attaches the
+// PluginContext of every inbound request to ctx (backend.MiddlewareHandler
+// calls WithPluginContext on QueryData, CallResource and CheckHealth alike), so
+// reading it here gives us the CURRENT caller's settings without threading an
+// extra parameter through every call site.
+func settingsFromContext(ctx context.Context) *backend.DataSourceInstanceSettings {
+	return backend.PluginConfigFromContext(ctx).DataSourceInstanceSettings
+}
+
+// baseKey is the per-request connection cache base key. It is derived from the
+// settings on ctx so that a per-user credential rewrite routes to a connection
+// opened as *that* user, rather than reusing the one created at instance init.
+// Outside a request (no PluginContext on ctx) it falls back to the connector's
+// init-time storeKey.
+func (c *Connector) baseKey(ctx context.Context) string {
+	if settings := settingsFromContext(ctx); settings != nil {
+		return storeKeyFor(*settings)
+	}
+	return c.storeKey
+}
+
+// defaultConnection returns the single-connection-path entry for baseKey,
+// opening and caching one with the current request's settings if this user has
+// no pooled connection yet. Shared by the query path and the health path so both
+// resolve to the same per-user connection.
+func (c *Connector) defaultConnection(ctx context.Context, baseKey string) (string, CachedConnection, error) {
+	key := defaultKey(baseKey)
+	if dbConn, ok := c.getDBConnection(key); ok {
+		return key, dbConn, nil
+	}
+
+	settings := settingsFromContext(ctx)
+	if settings == nil {
+		return "", CachedConnection{}, ErrorMissingDBConnection
+	}
+
+	db, err := c.driver.Connect(ctx, *settings, nil)
+	if err != nil {
+		return "", CachedConnection{}, backend.DownstreamError(err)
+	}
+	dbConn := CachedConnection{db, *settings}
+	c.storeDBConnection(key, dbConn)
+	return key, dbConn, nil
+}
+
 func NewConnector(ctx context.Context, driver Driver, settings backend.DataSourceInstanceSettings, enableMultipleConnections bool, opts ...ConnectorOption) (*Connector, error) {
 	ds := driver.Settings(ctx, settings)
 	db, err := driver.Connect(ctx, settings, nil)
@@ -92,10 +140,12 @@ func NewConnector(ctx context.Context, driver Driver, settings backend.DataSourc
 }
 
 func (c *Connector) Connect(ctx context.Context, headers http.Header) (*CachedConnection, error) {
-	key := c.defaultKey
-	dbConn, ok := c.getDBConnection(key)
-	if !ok {
-		return nil, ErrorMissingDBConnection
+	// Health must validate the connection of the user who triggered the check,
+	// not the one captured at instance init — otherwise "Save & Test" reports the
+	// init user's credentials as healthy for everybody.
+	key, dbConn, err := c.defaultConnection(ctx, c.baseKey(ctx))
+	if err != nil {
+		return nil, err
 	}
 
 	if c.driverSettings.Retries == 0 {
@@ -103,7 +153,7 @@ func (c *Connector) Connect(ctx context.Context, headers http.Header) (*CachedCo
 		return nil, err
 	}
 
-	err := c.connectWithRetries(ctx, dbConn, key, headers)
+	err = c.connectWithRetries(ctx, dbConn, key, headers)
 	return &dbConn, err
 }
 
@@ -208,19 +258,22 @@ func (c *Connector) GetConnectionFromQuery(ctx context.Context, q *Query) (strin
 	if !c.enableMultipleConnections && !c.driverSettings.ForwardHeaders && len(q.ConnectionArgs) > 0 && string(q.ConnectionArgs) != "{}" {
 		return "", CachedConnection{}, MissingMultipleConnectionsConfig
 	}
-	// The database connection may vary depending on query arguments
-	// The raw arguments are used as key to store the db connection in memory so they can be reused
-	key := c.defaultKey
-	dbConn, ok := c.getDBConnection(key)
-	if !ok {
-		return "", CachedConnection{}, MissingDBConnection
+	// The base key comes from the CURRENT request (see baseKey), not from
+	// instance init, so a per-user credential rewrite routes to a connection
+	// opened as that user. Keying only once in NewConnector made every user share
+	// the instance-init connection; this restores the pre-v5 getStoreKey(settings)
+	// behaviour without changing the upstream signature.
+	baseKey := c.baseKey(ctx)
+	key, dbConn, err := c.defaultConnection(ctx, baseKey)
+	if err != nil {
+		return "", CachedConnection{}, err
 	}
 	if !c.enableMultipleConnections || len(q.ConnectionArgs) == 0 {
 		backend.Logger.Debug("using single user connection")
 		return key, dbConn, nil
 	}
 
-	key = keyWithConnectionArgs(c.storeKey, q.ConnectionArgs)
+	key = keyWithConnectionArgs(baseKey, q.ConnectionArgs)
 	if cachedConn, ok := c.getDBConnection(key); ok {
 		backend.Logger.Debug("cached connection")
 		return key, cachedConn, nil

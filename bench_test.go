@@ -32,6 +32,9 @@ func newBenchDS(driver Driver) *SQLDatasource {
 	ds := NewDatasource(driver)
 	ds.connector.UID = "bench-uid"
 	ds.connector.driverSettings = DriverSettings{}
+	// storeKey is the base the per-request key derivation falls back to when ctx
+	// carries no PluginContext, which is the case for these benchmarks.
+	ds.connector.storeKey = ds.connector.UID
 	ds.connector.defaultKey = defaultKey(ds.connector.UID)
 	ds.connector.storeDBConnection(ds.connector.defaultKey, CachedConnection{
 		db:       nil,
